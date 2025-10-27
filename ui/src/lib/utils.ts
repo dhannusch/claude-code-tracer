@@ -1,8 +1,8 @@
-import { clsx, type ClassValue } from "clsx"
-import { twMerge } from "tailwind-merge"
+import { clsx, type ClassValue } from "clsx";
+import { twMerge } from "tailwind-merge";
 
 export function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs))
+  return twMerge(clsx(inputs));
 }
 
 // Type guard to check if value is a record object
@@ -63,18 +63,16 @@ export function summarizeAnthropicSSE(sse: string): SSESummary {
   let stopReason: string | null = null;
   let usage: unknown | null = null;
   for (const r of records) {
-    if (
-      r.event === "content_block_delta" &&
-      isRecord(r.data)
-    ) {
+    if (r.event === "content_block_delta" && isRecord(r.data)) {
       const delta = r.data.delta;
-      if (isRecord(delta) && delta.type === "text_delta" && typeof delta.text === "string") {
+      if (
+        isRecord(delta) &&
+        delta.type === "text_delta" &&
+        typeof delta.text === "string"
+      ) {
         text += delta.text;
       }
-    } else if (
-      r.event === "message_delta" &&
-      isRecord(r.data)
-    ) {
+    } else if (r.event === "message_delta" && isRecord(r.data)) {
       const delta = r.data.delta;
       if (isRecord(delta) && typeof delta.stop_reason === "string") {
         stopReason = delta.stop_reason;
@@ -118,9 +116,11 @@ export function calculateTokens(usage: unknown): number {
 /**
  * Extract response body from trace response object, handling wrapped or direct responses
  */
-export function getResponseBody<T = unknown>(trace: { response?: unknown }): T | undefined {
+export function getResponseBody<T = unknown>(trace: {
+  response?: unknown;
+}): T | undefined {
   if (!trace.response) return undefined;
-  if (isRecord(trace.response) && 'body' in trace.response) {
+  if (isRecord(trace.response) && "body" in trace.response) {
     return trace.response.body as T;
   }
   return trace.response as T;
@@ -209,4 +209,33 @@ export function prettifyText(raw: string): string {
   // Replace non-breaking spaces with regular spaces
   s = s.replace(/\u00a0/g, " ");
   return s.trim();
+}
+
+/**
+ * Parse a timestamp that may be a number, numeric string, or ISO string
+ * Returns a valid Date object or Invalid Date if parsing fails
+ */
+export function parseTimestamp(timestamp: unknown): Date {
+  if (!timestamp) return new Date(NaN);
+
+  // If it's already a Date, return it
+  if (timestamp instanceof Date) return timestamp;
+
+  // If it's a number, use it directly as Unix timestamp in milliseconds
+  if (typeof timestamp === "number") return new Date(timestamp);
+
+  // If it's a string, try to parse it
+  if (typeof timestamp === "string") {
+    // Check if it's a numeric string (Unix timestamp)
+    const numericTimestamp = Number(timestamp);
+    if (!isNaN(numericTimestamp) && numericTimestamp > 0) {
+      return new Date(numericTimestamp);
+    }
+
+    // Otherwise try parsing as ISO string or other date format
+    return new Date(timestamp);
+  }
+
+  // Fallback to invalid date
+  return new Date(NaN);
 }

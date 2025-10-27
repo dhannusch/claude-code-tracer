@@ -36,6 +36,7 @@ import {
   getResponseBody,
   extractTextFromContent,
   prettifyText,
+  parseTimestamp,
 } from "@/lib/utils";
 
 // Constants
@@ -151,16 +152,37 @@ export default function App() {
               : null;
 
             return {
-              id: String(st.id ?? ''),
+              id: String(st.id ?? ""),
               timestamp: String(st.timestamp ?? new Date().toISOString()),
-              model: isRecord(body) && typeof body.model === 'string' ? body.model : undefined,
-              messages: isRecord(body) && Array.isArray(body.messages) ? body.messages as Message[] : undefined,
-              tools: isRecord(body) && Array.isArray(body.tools) ? body.tools as Tool[] : undefined,
-              temperature: isRecord(body) && typeof body.temperature === 'number' ? body.temperature : undefined,
-              max_tokens: isRecord(body) && typeof body.max_tokens === 'number' ? body.max_tokens : undefined,
+              model:
+                isRecord(body) && typeof body.model === "string"
+                  ? body.model
+                  : undefined,
+              messages:
+                isRecord(body) && Array.isArray(body.messages)
+                  ? (body.messages as Message[])
+                  : undefined,
+              tools:
+                isRecord(body) && Array.isArray(body.tools)
+                  ? (body.tools as Tool[])
+                  : undefined,
+              temperature:
+                isRecord(body) && typeof body.temperature === "number"
+                  ? body.temperature
+                  : undefined,
+              max_tokens:
+                isRecord(body) && typeof body.max_tokens === "number"
+                  ? body.max_tokens
+                  : undefined,
               response: responseBody as ResponseBody | string | undefined,
-              latency: isRecord(responseWrapped) && typeof responseWrapped.latency === 'number' ? responseWrapped.latency : undefined,
-              tokensUsed: isRecord(tokensUsed) ? tokensUsed as TokenUsage : undefined,
+              latency:
+                isRecord(responseWrapped) &&
+                typeof responseWrapped.latency === "number"
+                  ? responseWrapped.latency
+                  : undefined,
+              tokensUsed: isRecord(tokensUsed)
+                ? (tokensUsed as TokenUsage)
+                : undefined,
             };
           }
         );
@@ -292,7 +314,7 @@ export default function App() {
                       )}
                     </div>
                     <CardDescription className="text-xs">
-                      {new Date(t.timestamp).toLocaleTimeString()}
+                      {parseTimestamp(t.timestamp).toLocaleTimeString()}
                     </CardDescription>
                   </CardHeader>
                   <CardContent className="p-3 pt-0">
@@ -370,7 +392,7 @@ function PrettyTab({ trace }: { trace: Trace }) {
             <div>
               <p className="text-sm text-muted-foreground">Timestamp</p>
               <p className="mt-1 text-sm font-medium text-foreground">
-                {new Date(trace.timestamp).toLocaleString()}
+                {parseTimestamp(trace.timestamp).toLocaleString()}
               </p>
             </div>
             {trace.latency && (
@@ -452,7 +474,7 @@ function ResponseCard({ trace }: { trace: Trace }) {
   const responseBody = getResponseBody(trace);
   const contentBlocks =
     isRecord(responseBody) && Array.isArray(responseBody.content)
-      ? responseBody.content as ContentBlock[]
+      ? (responseBody.content as ContentBlock[])
       : null;
 
   if (!contentBlocks) return null;
@@ -572,12 +594,16 @@ function ResponseTab({ trace }: { trace: Trace }) {
         <CardContent className="space-y-2">
           <Field
             label="Status"
-            value={isRecord(trace.response) ? trace.response.status ?? "N/A" : "N/A"}
+            value={
+              isRecord(trace.response) ? trace.response.status ?? "N/A" : "N/A"
+            }
           />
           <Field label="Latency" value={`${trace.latency ?? "N/A"}ms`} />
           <Field
             label="Stop Reason"
-            value={isRecord(responseBody) ? responseBody.stop_reason ?? "N/A" : "N/A"}
+            value={
+              isRecord(responseBody) ? responseBody.stop_reason ?? "N/A" : "N/A"
+            }
           />
         </CardContent>
       </Card>
