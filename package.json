@@ -1,0 +1,33 @@
+{
+  "name": "claude-code-tracer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local proxy and UI to trace Claude Code's LLM interactions",
+  "bin": {
+    "claude-code-tracer": "cli/index.js"
+  },
+  "scripts": {
+    "start": "node cli/index.js start",
+    "proxy": "node proxy/server.js",
+    "ui": "npm run dev --prefix ui",
+    "dev": "node cli/index.js start",
+    "build": "echo 'No root build step'"
+  },
+  "dependencies": {
+    "chalk": "^5.3.0",
+    "commander": "^12.1.0",
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "node-fetch": "^3.3.2",
+    "open": "^10.1.0",
+    "uuid": "^9.0.1",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "vite": "^5.4.10"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  }
+}
