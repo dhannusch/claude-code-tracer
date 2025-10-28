@@ -2,6 +2,8 @@
 
 Local proxy server that intercepts and visualizes all LLM interactions from Claude Code. Get real-time visibility into prompts, responses, tool calls, and token usage without modifying Claude Code itself.
 
+![Claude Code Tracer UI](assets/screenshot.png)
+
 ## Features
 
 - 🔍 **Real-time Request Tracing** - See every API call as it happens
