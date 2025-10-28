@@ -74,6 +74,17 @@ claude-code-tracer start --port 4000 --ui-port 4001
 claude-code-tracer stop
 ```
 
+### Port Configuration
+
+When you specify custom ports with `--port` and `--ui-port`, the CLI automatically:
+
+- Sets the proxy on the specified `--port` (default: 3000)
+- Sets the UI on the specified `--ui-port` (default: 3001)
+- Calculates WebSocket port as `proxy_port + 2` (e.g., 3002 for default proxy on 3000)
+- Passes `VITE_PROXY_URL` and `VITE_WS_URL` environment variables to the UI so it connects to the correct endpoints
+
+This means the UI will always connect to the correct proxy and WebSocket ports, even when using custom port configurations.
+
 ## API Endpoints
 
 The proxy exposes REST APIs for the UI:
@@ -81,6 +92,7 @@ The proxy exposes REST APIs for the UI:
 - `GET /api/sessions` - List all tracing sessions
 - `GET /api/traces/:sessionId?` - Get request traces (optionally filtered by session)
 - `GET /api/stats` - Aggregated statistics (total requests, tokens, avg latency, tool usage)
+- `POST /api/clear` - Clear all traces from the database
 
 ## Testing Without Claude Code
 
@@ -109,17 +121,25 @@ The request will appear in the UI immediately, and stats will update upon comple
 ```
 claude-code-tracer/
 ├── proxy/
-│   └── server.js         # Express proxy + SQLite database
+│   └── server.js         # Express proxy + SQLite (prepared statements)
 ├── ui/
 │   ├── src/
-│   │   ├── App.jsx       # React UI (WebSocket + REST)
-│   │   └── main.jsx      # Entry point
-│   ├── vite.config.js    # Vite configured for port 3001
+│   │   ├── App.tsx       # React UI (WebSocket + REST)
+│   │   ├── lib/utils.ts  # SSE parsing, token calculations
+│   │   └── main.tsx      # Entry point
+│   ├── vite.config.ts    # Vite configured for port 3001
 │   └── package.json
 ├── cli/
 │   └── index.js          # CLI entry point (starts proxy + UI)
 └── package.json          # Root package (bin: claude-code-tracer)
 ```
+
+### Design Principles
+
+- **Prepared Statements**: SQLite statements are prepared once at startup and reused for all requests, minimizing overhead
+- **Minimal Storage**: Request/response headers are not persisted (set to `NULL`) to reduce database bloat
+- **Accurate Metrics**: Streaming responses calculate total tokens (input + output) consistently with non-streaming requests
+- **Environment-Based Config**: UI discovers proxy/WebSocket URLs via Vite env vars (`VITE_PROXY_URL`, `VITE_WS_URL`) passed from CLI
 
 ## Database Schema
 
@@ -153,9 +173,16 @@ WebSocket will use proxy port + 2 (e.g., 4002).
 
 Check WebSocket connection in browser console. Ensure:
 
-- Proxy is running on port 3000
-- WebSocket server is on port 3002
+- Proxy is running on the configured port (default: 3000)
+- WebSocket server is on proxy port + 2 (default: 3002)
 - No firewall blocking localhost connections
+- UI received correct `VITE_PROXY_URL` and `VITE_WS_URL` (check browser console or Network tab)
+
+If you manually run the UI with `cd ui && npm run dev`, you must set the env vars:
+
+```bash
+VITE_PROXY_URL=http://localhost:3000 VITE_WS_URL=ws://localhost:3002 npm run dev
+```
 
 ### Native Module Errors (Node < 22.5)
 

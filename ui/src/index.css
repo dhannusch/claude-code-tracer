@@ -117,4 +117,31 @@
   body {
     @apply bg-background text-foreground;
   }
+
+  /* Prose styles for markdown rendering */
+  .prose {
+    @apply text-muted-foreground;
+  }
+  .prose ul,
+  .prose ol {
+    @apply my-2 ml-4 list-disc;
+  }
+  .prose ol {
+    @apply list-decimal;
+  }
+  .prose li {
+    @apply my-1;
+  }
+  .prose p {
+    @apply my-2;
+  }
+  .prose code {
+    @apply bg-muted px-1 py-0.5 rounded text-xs font-mono;
+  }
+  .prose strong {
+    @apply font-semibold text-foreground;
+  }
+  .prose a {
+    @apply text-primary underline hover:text-primary/80;
+  }
 }

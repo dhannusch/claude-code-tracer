@@ -19,9 +19,51 @@ class ClaudeCodeTracer {
     this.sessions = new Map();
     this.clients = new Set();
     this.setupDatabase();
+    this.setupStatements();
     this.setupMiddleware();
     this.setupRoutes();
     this.setupWebSocket();
+  }
+
+  setupStatements() {
+    // Frequently used prepared statements to reduce per-request overhead
+    this.stmts = {
+      insertRequest: this.db.prepare(`
+        INSERT INTO requests (id, session_id, timestamp, method, endpoint, headers, body, stream)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `),
+      insertResponseFull: this.db.prepare(`
+        INSERT INTO responses (id, request_id, timestamp, status, headers, body, latency, tokens_used)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `),
+      insertResponseStream: this.db.prepare(`
+        INSERT INTO responses (id, request_id, timestamp, status, body, latency, tokens_used)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `),
+      insertToolCall: this.db.prepare(`
+        INSERT INTO tool_calls (request_id, tool_name, input, timestamp)
+        VALUES (?, ?, ?, ?)
+      `),
+      selectResponsesByRequest: this.db.prepare(
+        "SELECT * FROM responses WHERE request_id = ?"
+      ),
+      selectToolCallsByRequest: this.db.prepare(
+        "SELECT * FROM tool_calls WHERE request_id = ?"
+      ),
+      selectSessions: this.db.prepare(
+        "SELECT * FROM sessions ORDER BY started_at DESC"
+      ),
+      selectRequestsBySession: this.db.prepare(
+        "SELECT * FROM requests WHERE session_id = ? ORDER BY timestamp DESC"
+      ),
+      selectRecentRequests: this.db.prepare(
+        "SELECT * FROM requests ORDER BY timestamp DESC LIMIT 100"
+      ),
+      insertSession: this.db.prepare(`
+        INSERT INTO sessions (id, started_at)
+        VALUES (?, ?)
+      `),
+    };
   }
 
   setupDatabase() {
@@ -44,6 +86,7 @@ class ClaudeCodeTracer {
         endpoint TEXT,
         headers TEXT,
         body TEXT,
+        stream INTEGER DEFAULT 0,
         FOREIGN KEY (session_id) REFERENCES sessions(id)
       )
     `);
@@ -99,23 +142,19 @@ class ClaudeCodeTracer {
           timestamp,
           method: "POST",
           endpoint: "/v1/messages",
-          headers: JSON.stringify(req.headers),
+          headers: null,
           body: JSON.stringify(req.body),
         };
 
-        const insertRequest = this.db.prepare(`
-          INSERT INTO requests (id, session_id, timestamp, method, endpoint, headers, body)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
-        `);
-
-        insertRequest.run(
+        this.stmts.insertRequest.run(
           requestId,
           this.currentSessionId,
           timestamp,
           requestTrace.method,
           requestTrace.endpoint,
           requestTrace.headers,
-          requestTrace.body
+          requestTrace.body,
+          req.body?.stream ? 1 : 0
         );
       } catch (dbError) {
         // eslint-disable-next-line no-console
@@ -133,6 +172,7 @@ class ClaudeCodeTracer {
           tools: req.body?.tools,
           temperature: req.body?.temperature,
           max_tokens: req.body?.max_tokens,
+          stream: req.body?.stream,
         },
       });
 
@@ -150,36 +190,23 @@ class ClaudeCodeTracer {
     });
 
     this.app.get("/api/sessions", (_req, res) => {
-      const sessionsStatement = this.db.prepare(
-        "SELECT * FROM sessions ORDER BY started_at DESC"
-      );
-      const sessions = sessionsStatement.all();
+      const sessions = this.stmts.selectSessions.all();
       res.json(sessions);
     });
 
     this.app.get("/api/traces/:sessionId?", (req, res) => {
-      const query = req.params.sessionId
-        ? "SELECT * FROM requests WHERE session_id = ? ORDER BY timestamp DESC"
-        : "SELECT * FROM requests ORDER BY timestamp DESC LIMIT 100";
-
-      const requestsStatement = this.db.prepare(query);
       const traces = req.params.sessionId
-        ? requestsStatement.all(req.params.sessionId)
-        : requestsStatement.all();
-
-      const responsesStatement = this.db.prepare(
-        "SELECT * FROM responses WHERE request_id = ?"
-      );
-      const toolCallsStatement = this.db.prepare(
-        "SELECT * FROM tool_calls WHERE request_id = ?"
-      );
+        ? this.stmts.selectRequestsBySession.all(req.params.sessionId)
+        : this.stmts.selectRecentRequests.all();
 
       const fullTraces = traces.map((trace) => {
-        const response = responsesStatement.get(trace.id);
-        const toolCalls = toolCallsStatement.all(trace.id);
+        const response = this.stmts.selectResponsesByRequest.get(trace.id);
+        const toolCalls = this.stmts.selectToolCallsByRequest.all(trace.id);
+        const parsedBody = safeParseJSON(trace.body);
         return {
           ...trace,
-          body: safeParseJSON(trace.body),
+          body: parsedBody,
+          stream: trace.stream === 1 || parsedBody?.stream === true,
           response: response
             ? { ...response, body: safeParseJSON(response.body) }
             : null,
@@ -191,7 +218,9 @@ class ClaudeCodeTracer {
     });
 
     this.app.get("/api/stats", (_req, res) => {
-      const requestCountStatement = this.db.prepare("SELECT COUNT(*) as count FROM requests");
+      const requestCountStatement = this.db.prepare(
+        "SELECT COUNT(*) as count FROM requests"
+      );
       const tokenSumStatement = this.db.prepare(
         "SELECT SUM(tokens_used) as total FROM responses"
       );
@@ -256,7 +285,8 @@ class ClaudeCodeTracer {
   buildAnthropicHeaders(requestHeaders) {
     return {
       "x-api-key": requestHeaders["x-api-key"] || process.env.ANTHROPIC_API_KEY,
-      "anthropic-version": requestHeaders["anthropic-version"] || ANTHROPIC_DEFAULT_VERSION,
+      "anthropic-version":
+        requestHeaders["anthropic-version"] || ANTHROPIC_DEFAULT_VERSION,
       "content-type": "application/json",
     };
   }
@@ -268,12 +298,7 @@ class ClaudeCodeTracer {
 
     for (const content of responseData.content) {
       if (content?.type === "tool_use") {
-        const toolStatement = this.db.prepare(`
-          INSERT INTO tool_calls (request_id, tool_name, input, timestamp)
-          VALUES (?, ?, ?, ?)
-        `);
-
-        toolStatement.run(
+        this.stmts.insertToolCall.run(
           requestId,
           content.name,
           JSON.stringify(content.input ?? null),
@@ -310,6 +335,63 @@ class ClaudeCodeTracer {
     }
   }
 
+  // Calculate total tokens from a usage object
+  calculateTokens(usage) {
+    if (!usage || typeof usage !== "object") return 0;
+    const total = usage.total_tokens;
+    if (typeof total === "number" && isFinite(total)) return total;
+    const input =
+      typeof usage.input_tokens === "number" ? usage.input_tokens : 0;
+    const output =
+      typeof usage.output_tokens === "number" ? usage.output_tokens : 0;
+    return input + output;
+  }
+
+  // Extract token usage from Anthropic SSE by scanning for usage in message_delta (preferred) or message_start
+  extractUsageFromSSE(sse) {
+    try {
+      const records = sse.split("\n\n");
+      let usage = null;
+      for (const rec of records) {
+        if (!rec) continue;
+        const lines = rec.split("\n");
+        let evt = null;
+        const dataParts = [];
+        for (const line of lines) {
+          const t = line.trim();
+          if (!t) continue;
+          if (t.startsWith("event:")) evt = t.slice(6).trim();
+          else if (t.startsWith("data:")) dataParts.push(t.slice(5).trim());
+        }
+        if (evt !== "message_delta" && evt !== "message_start") continue;
+        const rawData = dataParts.join("\n");
+        try {
+          const parsed = JSON.parse(rawData);
+          if (evt === "message_delta") {
+            if (parsed && typeof parsed === "object" && parsed.usage) {
+              usage = parsed.usage;
+            }
+          } else if (evt === "message_start") {
+            if (
+              parsed &&
+              typeof parsed === "object" &&
+              parsed.message &&
+              typeof parsed.message === "object" &&
+              parsed.message.usage
+            ) {
+              usage = parsed.message.usage;
+            }
+          }
+        } catch (_e) {
+          // ignore parse errors and continue
+        }
+      }
+      return usage;
+    } catch (_e) {
+      return null;
+    }
+  }
+
   async handleRegularRequest(req, res, requestId) {
     const startTime = Date.now();
 
@@ -323,22 +405,15 @@ class ClaudeCodeTracer {
     const latency = Date.now() - startTime;
 
     try {
-      const insertResponse = this.db.prepare(`
-        INSERT INTO responses (id, request_id, timestamp, status, headers, body, latency, tokens_used)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-
-      insertResponse.run(
+      this.stmts.insertResponseFull.run(
         uuidv4(),
         requestId,
         Date.now(),
         anthropicResponse.status,
-        JSON.stringify(
-          Object.fromEntries(anthropicResponse.headers.entries?.() || [])
-        ),
+        null,
         JSON.stringify(responseData),
         latency,
-        responseData?.usage?.output_tokens || 0
+        this.calculateTokens(responseData?.usage)
       );
 
       this.extractAndStoreToolCalls(requestId, responseData);
@@ -354,7 +429,7 @@ class ClaudeCodeTracer {
         requestId,
         response: responseData,
         latency,
-        tokensUsed: responseData?.usage,
+        tokensUsedTotal: this.calculateTokens(responseData?.usage),
       },
     });
 
@@ -380,48 +455,56 @@ class ClaudeCodeTracer {
       const chunkStr = chunk.toString();
       fullResponse += chunkStr;
       res.write(chunkStr);
-      this.broadcast({
-        type: "stream_chunk",
-        data: { requestId, chunk: chunkStr },
-      });
     });
 
     reader.on("end", () => {
       const latency = Date.now() - startTime;
 
       try {
-        const insertResponse = this.db.prepare(`
-          INSERT INTO responses (id, request_id, timestamp, status, body, latency)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `);
+        // Try to extract usage tokens from the SSE stream once
+        const sseUsage = this.extractUsageFromSSE(fullResponse);
+        // Try to extract the last JSON object from the SSE stream for structured response data
+        const parsedFinal = this.parseStreamingResponse(fullResponse);
+        // Fallback usage from SSE if final parsed object does not include usage
+        const usage = parsedFinal?.usage || sseUsage;
+        const tokensTotal = this.calculateTokens(usage);
 
-        insertResponse.run(
+        this.stmts.insertResponseStream.run(
           uuidv4(),
           requestId,
           Date.now(),
           200,
           fullResponse,
-          latency
+          latency,
+          tokensTotal
         );
+
+        this.broadcast({
+          type: "response",
+          data: {
+            requestId,
+            // Keep shape consistent with non-streaming where UI expects response + usage in tokensUsed
+            response: parsedFinal || fullResponse,
+            latency,
+            tokensUsedTotal: tokensTotal,
+          },
+        });
       } catch (dbError) {
         // eslint-disable-next-line no-console
         console.error("Database error storing streaming response:", dbError);
         // Continue to complete the stream even if DB storage fails
+        const parsedFinal = this.parseStreamingResponse(fullResponse);
+        const usage = this.extractUsageFromSSE(fullResponse);
+        this.broadcast({
+          type: "response",
+          data: {
+            requestId,
+            response: parsedFinal || fullResponse,
+            latency,
+            tokensUsedTotal: this.calculateTokens(usage),
+          },
+        });
       }
-
-      // Try to extract the last JSON object from the SSE stream for structured response data
-      const parsedFinal = this.parseStreamingResponse(fullResponse);
-
-      this.broadcast({
-        type: "response",
-        data: {
-          requestId,
-          // Keep shape consistent with non-streaming where UI expects response + usage in tokensUsed
-          response: parsedFinal || fullResponse,
-          latency,
-          tokensUsed: parsedFinal?.usage,
-        },
-      });
       res.end();
     });
   }
@@ -451,11 +534,7 @@ class ClaudeCodeTracer {
 
   createSession() {
     this.currentSessionId = uuidv4();
-    const insertSession = this.db.prepare(`
-      INSERT INTO sessions (id, started_at)
-      VALUES (?, ?)
-    `);
-    insertSession.run(this.currentSessionId, Date.now());
+    this.stmts.insertSession.run(this.currentSessionId, Date.now());
   }
 
   start() {
@@ -467,7 +546,9 @@ class ClaudeCodeTracer {
         `🚀 Claude Code Tracer proxy running on http://localhost:${this.port}`
       );
       // eslint-disable-next-line no-console
-      console.log(`📊 WebSocket server running on ws://localhost:${this.wsPort}`);
+      console.log(
+        `📊 WebSocket server running on ws://localhost:${this.wsPort}`
+      );
     });
   }
 
@@ -481,10 +562,15 @@ class ClaudeCodeTracer {
 }
 
 function safeParseJSON(maybeJSON) {
+  if (!maybeJSON) return null;
+  if (typeof maybeJSON !== "string") return maybeJSON;
+  // If it looks like SSE format, return as-is (for streaming responses)
+  if (maybeJSON.trim().startsWith("event:")) return maybeJSON;
   try {
     return JSON.parse(maybeJSON);
   } catch (_e) {
-    return null;
+    // If parsing fails, return the raw string (e.g., for SSE or other formats)
+    return maybeJSON;
   }
 }
 

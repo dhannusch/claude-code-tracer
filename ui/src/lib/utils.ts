@@ -80,6 +80,10 @@ export function summarizeAnthropicSSE(sse: string): SSESummary {
       if (r.data.usage !== undefined) {
         usage = r.data.usage;
       }
+    } else if (r.event === "message_start" && isRecord(r.data)) {
+      if (isRecord(r.data.message) && r.data.message.usage !== undefined) {
+        usage = r.data.message.usage;
+      }
     }
   }
   return { text, stopReason, usage };
@@ -238,4 +242,21 @@ export function parseTimestamp(timestamp: unknown): Date {
 
   // Fallback to invalid date
   return new Date(NaN);
+}
+
+/**
+ * Determines if a response is from a streaming request by checking the response body format
+ * Streaming responses are stored as SSE (Server-Sent Events) strings
+ */
+export function isStreamingResponse(response: unknown): boolean {
+  if (typeof response === "string" && response.trim().startsWith("event:")) {
+    return true;
+  }
+  if (isRecord(response) && "body" in response) {
+    const body = response.body;
+    if (typeof body === "string" && body.trim().startsWith("event:")) {
+      return true;
+    }
+  }
+  return false;
 }

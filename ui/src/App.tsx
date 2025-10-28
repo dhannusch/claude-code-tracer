@@ -21,35 +21,34 @@ import {
 } from "@/components/ui/dialog";
 import {
   Clock,
-  Zap,
+  Coins,
   Hash,
-  ArrowRight,
   CheckCircle2,
   XCircle,
+  ChevronDown,
+  ChevronUp,
+  Loader2,
 } from "lucide-react";
+import ReactMarkdown from "react-markdown";
 import {
   parseSSEToEvents,
   summarizeAnthropicSSE,
   getMessageText,
   isRecord,
-  calculateTokens,
   getResponseBody,
   extractTextFromContent,
   prettifyText,
   parseTimestamp,
+  isStreamingResponse,
 } from "@/lib/utils";
 
 // Constants
 const MAX_TRACES = 100;
-const WS_URL = "ws://localhost:3002";
-const API_BASE_URL = "http://localhost:3000";
+const WS_URL = import.meta.env.VITE_WS_URL ?? "ws://localhost:3002";
+const PROXY_URL = import.meta.env.VITE_PROXY_URL ?? "http://localhost:3000";
 
 // Types
-interface TokenUsage {
-  total_tokens?: number;
-  input_tokens?: number;
-  output_tokens?: number;
-}
+// Unified token metric: single total value
 
 interface Message {
   role: string;
@@ -73,7 +72,7 @@ interface ContentBlock {
 interface ResponseBody {
   content?: ContentBlock[];
   stop_reason?: string;
-  usage?: TokenUsage;
+  usage?: unknown;
   [key: string]: unknown;
 }
 
@@ -94,7 +93,8 @@ interface Trace {
   max_tokens?: number;
   response?: TraceResponse | ResponseBody | string;
   latency?: number;
-  tokensUsed?: TokenUsage;
+  tokensUsedTotal?: number;
+  stream?: boolean;
 }
 
 export default function App() {
@@ -131,7 +131,7 @@ export default function App() {
     // Load persisted recent traces
     (async () => {
       try {
-        const res = await fetch(`${API_BASE_URL}/api/traces`);
+        const res = await fetch(`${PROXY_URL}/api/traces`);
         const serverTraces: unknown = await res.json();
         const mapped = (Array.isArray(serverTraces) ? serverTraces : []).map(
           (st: unknown): Trace => {
@@ -147,9 +147,13 @@ export default function App() {
             const responseBody = isRecord(responseWrapped)
               ? responseWrapped.body ?? responseWrapped
               : null;
-            const tokensUsed = isRecord(responseBody)
-              ? responseBody.usage ?? null
-              : null;
+            // Single numeric total from DB persisted response row
+            const tokensUsedTotal =
+              isRecord(responseWrapped) &&
+              typeof responseWrapped.tokens_used === "number" &&
+              isFinite(responseWrapped.tokens_used)
+                ? (responseWrapped.tokens_used as number)
+                : undefined;
 
             return {
               id: String(st.id ?? ""),
@@ -180,9 +184,13 @@ export default function App() {
                 typeof responseWrapped.latency === "number"
                   ? responseWrapped.latency
                   : undefined,
-              tokensUsed: isRecord(tokensUsed)
-                ? (tokensUsed as TokenUsage)
-                : undefined,
+              tokensUsedTotal,
+              stream:
+                (isRecord(st) && typeof st.stream === "boolean" && st.stream) ||
+                (isRecord(body) &&
+                  typeof body.stream === "boolean" &&
+                  body.stream) ||
+                isStreamingResponse(responseBody),
             };
           }
         );
@@ -199,7 +207,11 @@ export default function App() {
 
   const visibleRequestCount = useMemo(() => traces.length, [traces]);
   const visibleTokenCount = useMemo(() => {
-    return traces.reduce((acc, t) => acc + calculateTokens(t.tokensUsed), 0);
+    return traces.reduce(
+      (acc, t) =>
+        acc + (typeof t.tokensUsedTotal === "number" ? t.tokensUsedTotal : 0),
+      0
+    );
   }, [traces]);
   const avgLatencyMs = useMemo(() => {
     const latencies = traces
@@ -224,7 +236,7 @@ export default function App() {
             <Hash className="inline h-4 w-4" /> {visibleRequestCount} requests
           </span>
           <span className="text-muted-foreground">
-            <Zap className="inline h-4 w-4" /> {visibleTokenCount} tokens
+            <Coins className="inline h-4 w-4" /> {visibleTokenCount} tokens
           </span>
           <span className="text-muted-foreground">
             <Clock className="inline h-4 w-4" /> {Math.round(avgLatencyMs)}ms
@@ -262,7 +274,7 @@ export default function App() {
                   className="inline-flex items-center rounded bg-destructive px-3 py-1.5 text-sm font-medium text-destructive-foreground hover:bg-destructive/90"
                   onClick={async () => {
                     try {
-                      await fetch(`${API_BASE_URL}/api/clear`, {
+                      await fetch(`${PROXY_URL}/api/clear`, {
                         method: "POST",
                       });
                     } catch (error) {
@@ -303,13 +315,25 @@ export default function App() {
                 >
                   <CardHeader className="p-3 pb-2">
                     <div className="flex items-start justify-between gap-2">
-                      <CardTitle className="text-sm font-medium">
-                        {t.model || "Unknown"}
-                      </CardTitle>
-                      {t.response && (
+                      <div className="flex flex-col gap-1">
+                        <CardTitle className="text-sm font-medium">
+                          {t.model || "Unknown"}
+                        </CardTitle>
+                        {t.stream && (
+                          <Badge variant="outline" className="text-xs w-fit">
+                            Streaming
+                          </Badge>
+                        )}
+                      </div>
+                      {t.response ? (
                         <Badge variant="secondary" className="text-xs">
                           <CheckCircle2 className="mr-1 h-3 w-3" />
                           {t.latency}ms
+                        </Badge>
+                      ) : (
+                        <Badge variant="outline" className="text-xs">
+                          <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                          Pending
                         </Badge>
                       )}
                     </div>
@@ -321,7 +345,7 @@ export default function App() {
                     <p className="line-clamp-2 text-xs text-muted-foreground">
                       {getMessageText(t.messages)}
                     </p>
-                    <TokenDisplay tokensUsed={t.tokensUsed} />
+                    <TokenDisplay tokensUsed={t.tokensUsedTotal} />
                   </CardContent>
                 </Card>
               ))}
@@ -395,6 +419,15 @@ function PrettyTab({ trace }: { trace: Trace }) {
                 {parseTimestamp(trace.timestamp).toLocaleString()}
               </p>
             </div>
+            <div>
+              <p className="text-sm text-muted-foreground">Response Type</p>
+              <Badge
+                variant={trace.stream ? "default" : "secondary"}
+                className="mt-1"
+              >
+                {trace.stream ? "Streaming" : "Non-streaming"}
+              </Badge>
+            </div>
             {trace.latency && (
               <div>
                 <p className="text-sm text-muted-foreground">Latency</p>
@@ -406,44 +439,19 @@ function PrettyTab({ trace }: { trace: Trace }) {
                 </div>
               </div>
             )}
-            {trace.tokensUsed && (
-              <div>
-                <p className="text-sm text-muted-foreground">Total Tokens</p>
-                <div className="mt-1 flex items-center gap-2">
-                  <Zap className="h-4 w-4 text-chart-3" />
-                  <span className="text-sm font-medium text-foreground">
-                    {trace.tokensUsed.total_tokens || 0}
-                  </span>
+            {typeof trace.tokensUsedTotal === "number" &&
+              trace.tokensUsedTotal > 0 && (
+                <div>
+                  <p className="text-sm text-muted-foreground">Total Tokens</p>
+                  <div className="mt-1 flex items-center gap-2">
+                    <Coins className="h-4 w-4 text-chart-3" />
+                    <span className="text-sm font-medium text-foreground">
+                      {trace.tokensUsedTotal}
+                    </span>
+                  </div>
                 </div>
-              </div>
-            )}
+              )}
           </div>
-
-          {trace.tokensUsed && (
-            <>
-              <Separator />
-              <div>
-                <p className="mb-2 text-sm font-medium text-muted-foreground">
-                  Token Breakdown
-                </p>
-                <div className="flex gap-4">
-                  <div className="flex items-center gap-2">
-                    <Badge variant="secondary">Input</Badge>
-                    <span className="text-sm text-foreground">
-                      {trace.tokensUsed.input_tokens || 0}
-                    </span>
-                  </div>
-                  <ArrowRight className="h-4 w-4 self-center text-muted-foreground" />
-                  <div className="flex items-center gap-2">
-                    <Badge variant="secondary">Output</Badge>
-                    <span className="text-sm text-foreground">
-                      {trace.tokensUsed.output_tokens || 0}
-                    </span>
-                  </div>
-                </div>
-              </div>
-            </>
-          )}
         </CardContent>
       </Card>
 
@@ -472,60 +480,69 @@ function PrettyTab({ trace }: { trace: Trace }) {
 
 function ResponseCard({ trace }: { trace: Trace }) {
   const responseBody = getResponseBody(trace);
+
+  // Return null only if there's no response at all
+  if (!responseBody) return null;
+
   const contentBlocks =
     isRecord(responseBody) && Array.isArray(responseBody.content)
       ? (responseBody.content as ContentBlock[])
       : null;
 
-  if (!contentBlocks) return null;
-
   let summaryText = "";
+  let stopReason = null;
+
   if (typeof responseBody === "string") {
+    // Streaming response (SSE format)
     const s = summarizeAnthropicSSE(responseBody);
     summaryText = s.text;
+    stopReason = s.stopReason;
   } else if (isRecord(responseBody) && Array.isArray(responseBody.content)) {
+    // Non-streaming response with content blocks
     const textBlocks = responseBody.content.filter(
       (c): c is ContentBlock => isRecord(c) && c.type === "text"
     );
     summaryText = textBlocks.map((b) => b.text || "").join("\n\n");
+    stopReason = responseBody.stop_reason as string | null;
   }
 
   return (
     <Card>
       <CardHeader>
         <CardTitle>Response</CardTitle>
-        {isRecord(responseBody) && responseBody.stop_reason ? (
+        {stopReason && (
           <CardDescription>
             <Badge variant="outline" className="mt-1">
-              {String(responseBody.stop_reason)}
+              {String(stopReason)}
             </Badge>
           </CardDescription>
-        ) : null}
+        )}
       </CardHeader>
       <CardContent className="space-y-4">
         {summaryText && (
           <div className="space-y-2">
             <Badge variant="secondary">Summary</Badge>
             <CodeBlock>{summaryText}</CodeBlock>
-            <Separator />
+            {contentBlocks && <Separator />}
           </div>
         )}
-        {contentBlocks.map((block, i) => (
-          <div key={i} className="space-y-2">
-            <Badge variant={block.type === "text" ? "default" : "secondary"}>
-              {block.type}
-            </Badge>
-            {block.type === "text" ? (
-              <CodeBlock>{block.text || ""}</CodeBlock>
-            ) : (
-              <div className="rounded-lg bg-muted p-4">
-                <pre className="whitespace-pre-wrap text-sm text-foreground">
-                  {JSON.stringify(block, null, 2)}
-                </pre>
-              </div>
-            )}
-          </div>
-        ))}
+        {contentBlocks &&
+          contentBlocks.map((block, i) => (
+            <div key={i} className="space-y-2">
+              <Badge variant={block.type === "text" ? "default" : "secondary"}>
+                {block.type}
+              </Badge>
+              {block.type === "text" ? (
+                <CodeBlock>{block.text || ""}</CodeBlock>
+              ) : (
+                <div className="rounded-lg bg-muted p-4">
+                  <pre className="whitespace-pre-wrap text-sm text-foreground">
+                    {JSON.stringify(block, null, 2)}
+                  </pre>
+                </div>
+              )}
+            </div>
+          ))}
       </CardContent>
     </Card>
   );
@@ -559,12 +576,17 @@ function RequestTab({ trace }: { trace: Trace }) {
       {trace.tools && trace.tools.length > 0 && (
         <Card>
           <CardHeader>
-            <CardTitle>Tools</CardTitle>
+            <CardTitle>Tools ({trace.tools.length})</CardTitle>
+            <CardDescription>Available tools for this request</CardDescription>
           </CardHeader>
-          <CardContent>
-            <pre className="overflow-auto rounded-lg bg-muted p-4 text-xs text-foreground">
-              {JSON.stringify(trace.tools, null, 2)}
-            </pre>
+          <CardContent className="space-y-6">
+            {trace.tools.map((tool, i) => (
+              <ToolDisplay
+                key={i}
+                tool={tool}
+                isLast={i === (trace.tools?.length ?? 0) - 1}
+              />
+            ))}
           </CardContent>
         </Card>
       )}
@@ -572,8 +594,97 @@ function RequestTab({ trace }: { trace: Trace }) {
   );
 }
 
+function ToolDisplay({ tool, isLast }: { tool: Tool; isLast: boolean }) {
+  const [isDescriptionOpen, setIsDescriptionOpen] = useState(false);
+  const inputSchema = tool.input_schema;
+  const hasValidSchema =
+    isRecord(inputSchema) && isRecord(inputSchema.properties);
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-start gap-2">
+        <Badge variant="outline" className="mt-0.5">
+          {tool.name}
+        </Badge>
+      </div>
+      {tool.description && (
+        <div className="space-y-2">
+          <button
+            type="button"
+            onClick={() => setIsDescriptionOpen(!isDescriptionOpen)}
+            className="flex items-center gap-2 text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
+          >
+            {isDescriptionOpen ? (
+              <ChevronUp className="h-4 w-4" />
+            ) : (
+              <ChevronDown className="h-4 w-4" />
+            )}
+            Description
+          </button>
+          {isDescriptionOpen && (
+            <div className="text-sm text-muted-foreground prose prose-sm max-w-none dark:prose-invert">
+              <ReactMarkdown>{tool.description}</ReactMarkdown>
+            </div>
+          )}
+        </div>
+      )}
+      {hasValidSchema ? (
+        <div className="space-y-2">
+          <p className="text-xs font-medium text-muted-foreground uppercase">
+            Parameters
+          </p>
+          <div className="rounded-lg border border-border bg-muted/50 p-3 space-y-2">
+            {Object.entries(
+              inputSchema.properties as Record<string, unknown>
+            ).map(([propName, propSchema]) => {
+              const schema = isRecord(propSchema) ? propSchema : {};
+              const requiredFields = Array.isArray(inputSchema.required)
+                ? (inputSchema.required as string[])
+                : [];
+              const isRequired = requiredFields.includes(propName);
+              return (
+                <div key={propName} className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <code className="text-xs font-mono text-foreground">
+                      {propName}
+                    </code>
+                    {isRequired && (
+                      <Badge
+                        variant="secondary"
+                        className="text-[10px] px-1.5 py-0"
+                      >
+                        required
+                      </Badge>
+                    )}
+                    {typeof schema.type === "string" && (
+                      <span className="text-xs text-muted-foreground">
+                        ({schema.type})
+                      </span>
+                    )}
+                  </div>
+                  {typeof schema.description === "string" && (
+                    <p className="text-xs text-muted-foreground pl-4">
+                      {schema.description}
+                    </p>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
+      {!isLast && <Separator />}
+    </div>
+  );
+}
+
 function ResponseTab({ trace }: { trace: Trace }) {
   const responseBody = getResponseBody(trace);
+  const sseSummary = useMemo(() => {
+    return typeof responseBody === "string"
+      ? summarizeAnthropicSSE(responseBody)
+      : null;
+  }, [responseBody]);
   if (!responseBody) {
     return (
       <Card>
@@ -614,20 +725,16 @@ function ResponseTab({ trace }: { trace: Trace }) {
         </CardHeader>
         <CardContent>
           {typeof responseBody === "string" ? (
-            // Pretty SSE viewer
             <div className="space-y-4">
-              {(() => {
-                const summary = summarizeAnthropicSSE(responseBody);
-                return (
-                  <div className="space-y-2">
-                    <Badge variant="secondary">Summary</Badge>
-                    <CodeBlock>{summary.text || "(no text body)"}</CodeBlock>
-                    <div className="text-sm text-muted-foreground">
-                      Stop reason: {summary.stopReason ?? "N/A"}
-                    </div>
+              {sseSummary && (
+                <div className="space-y-2">
+                  <Badge variant="secondary">Summary</Badge>
+                  <CodeBlock>{sseSummary.text || "(no text body)"}</CodeBlock>
+                  <div className="text-sm text-muted-foreground">
+                    Stop reason: {sseSummary.stopReason ?? "N/A"}
                   </div>
-                );
-              })()}
+                </div>
+              )}
               <Separator />
               <div className="space-y-2">
                 <Badge>Events</Badge>
@@ -688,8 +795,8 @@ function Field({
   );
 }
 
-function TokenDisplay({ tokensUsed }: { tokensUsed?: TokenUsage }) {
-  const totalTokens = calculateTokens(tokensUsed);
+function TokenDisplay({ tokensUsed }: { tokensUsed?: number }) {
+  const totalTokens = typeof tokensUsed === "number" ? tokensUsed : 0;
   if (totalTokens === 0) return null;
 
   return <p className="mt-1 text-xs text-chart-2">{totalTokens} tokens</p>;

@@ -81,6 +81,11 @@ program
         uiProcess = spawn("npm", ["run", "dev"], {
           cwd: path.join(__dirname, "../ui"),
           stdio: "inherit",
+          env: {
+            ...process.env,
+            VITE_PROXY_URL: `http://localhost:${options.port}`,
+            VITE_WS_URL: `ws://localhost:${Number(options.port) + 2}`,
+          },
         });
 
         // Wait for UI server to initialize before opening browser
